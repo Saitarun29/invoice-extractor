@@ -1,0 +1,440 @@
+{
+  "name": "Invoice Extractor · Gmail to validated Sheets row or Slack review (by @SaiTarunRonanki)",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Invoice Extractor · by @SaiTarunRonanki\n\nProduction twin of the invoice-extractor app.\n\n1. **Gmail Trigger** polls every minute for unread mail with a PDF or image attachment and downloads it.\n2. **Prepare attachment** picks the first PDF/PNG/JPEG/WebP and builds a Gemini request with the file as `inline_data`.\n3. **Extract (Gemini)** calls `gemini-2.0-flash` in JSON mode. Numbers are copied as printed, never recomputed.\n4. **Validate** runs the same 7 checks as the app: required fields, line arithmetic, lines = subtotal, tax breakdown (CGST = SGST, no IGST with CGST/SGST), subtotal + tax = total, due after issue, duplicate vendor + number (workflow static data).\n5. **Auto-approve?** passes when every check passes and min confidence >= 0.85. True: **Append to Sheets**. False: **Slack review**.\n\n**Env vars:** `GEMINI_API_KEY`, `INVOICE_SHEET_ID`, `INVOICE_SHEET_TAB` (default Invoices), `SLACK_REVIEW_CHANNEL` (e.g. #ap-review), optional `INVOICE_CONFIDENCE_FLOOR` (0.85), `INVOICE_PROMPT`.\n\n**Credentials:** none embedded. Attach Gmail OAuth2, Google Sheets OAuth2 and Slack after import. Static data (duplicate keys) persists only for active, production executions.",
+        "height": 600,
+        "width": 520,
+        "color": 7
+      },
+      "id": "cf92db0c-0ee7-4bbd-b6bd-0a72be944900",
+      "name": "Sticky Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -640,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "has:attachment is:unread (filename:pdf OR filename:png OR filename:jpg OR filename:jpeg OR filename:webp)"
+        },
+        "options": {
+          "downloadAttachments": true,
+          "dataPropertyAttachmentsPrefixName": "attachment_"
+        }
+      },
+      "id": "f74e02a7-9f0d-4a2f-b23d-81b1e1517ce7",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick the first PDF or image attachment from the email and build the Gemini request.\nconst ALLOWED = ['application/pdf', 'image/png', 'image/jpeg', 'image/webp'];\nconst MAX_BYTES = 15 * 1024 * 1024; // Gemini inline_data request limit is 20 MB\nconst out = [];\nfor (let i = 0; i < $input.all().length; i++) {\n  const item = $input.all()[i];\n  const bin = item.binary || {};\n  const key = Object.keys(bin).find((k) => ALLOWED.includes(bin[k].mimeType));\n  if (!key) continue; // no invoice-like attachment: skip this email\n  const buf = await this.helpers.getBinaryDataBuffer(i, key);\n  if (buf.length > MAX_BYTES) continue;\n  const prompt = $env.INVOICE_PROMPT || [\n    'You extract structured data from one invoice, bill or receipt. Return only JSON with keys:',\n    'vendor, vendor_tax_id, bill_to, invoice_number, issue_date (YYYY-MM-DD), due_date (YYYY-MM-DD), currency (ISO 4217),',\n    'line_items [{description, quantity, unit_price, amount}], subtotal, tax_lines [{label (CGST|SGST|UTGST|IGST|VAT|Sales tax), rate, amount}],',\n    'tax_total, total, payment_terms, confidence {same field names: number 0..1}, flags [string].',\n    'Copy numbers exactly as printed, never recompute them. Use null for anything missing. Indian dates are day-first.',\n  ].join(' ');\n  out.push({ json: {\n    message_id: item.json.id,\n    from: item.json.from?.value?.[0]?.address || item.json.from || null,\n    subject: item.json.subject || '',\n    file_name: bin[key].fileName || key,\n    request: {\n      contents: [{ role: 'user', parts: [{ text: prompt }, { inline_data: { mime_type: bin[key].mimeType, data: buf.toString('base64') } }] }],\n      generationConfig: { responseMimeType: 'application/json', temperature: 0 },\n    },\n  } });\n}\nreturn out;\n"
+      },
+      "id": "6797737a-6b71-4c83-b203-f122a046dd5b",
+      "name": "Prepare attachment",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-goog-api-key",
+              "value": "={{ $env.GEMINI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.request) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "id": "3f81dbd5-2948-4ea4-927e-71a2dd5f973e",
+      "name": "Extract (Gemini)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        440,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Same checks, 0.85 floor and duplicate key as the invoice-extractor app (assets/core.js).\nconst FLOOR = Number($env.INVOICE_CONFIDENCE_FLOOR || 0.85);\nconst seen = $getWorkflowStaticData('global');\nseen.keys = seen.keys || [];\nconst num = (v) => { if (v === null || v === undefined || v === '') return null; const n = Number(String(v).replace(/[^\\d.\\-]/g, '')); return Number.isFinite(n) ? n : null; };\nconst c = (n) => Math.round(Number(n) * 100);\nconst near = (a, b, tol = 1) => Math.abs(c(a) - c(b)) <= tol;\nconst iso = (s) => (/^\\d{4}-\\d{2}-\\d{2}$/.test(String(s || '')) ? String(s) : null);\nconst dupKey = (inv) => {\n  const v = String(inv.vendor || '').toLowerCase().replace(/\\b(private|pvt|limited|ltd|inc|llc|llp|corp|co|company)\\b\\.?/g, '').replace(/[^a-z0-9]/g, '');\n  const n = String(inv.invoice_number || '').toUpperCase().replace(/[^A-Z0-9]/g, '');\n  return v && n ? v + '|' + n : null;\n};\n\nreturn $input.all().map((item, idx) => {\n  const prep = $('Prepare attachment').all()[idx]?.json || {};\n  let raw = {};\n  try {\n    const text = (item.json.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');\n    raw = JSON.parse(text.replace(/^```(?:json)?\\s*|\\s*```$/g, ''));\n  } catch (e) { raw = {}; }\n  const items = (raw.line_items || []).map((li) => ({ description: String(li.description || 'Item'), quantity: num(li.quantity), unit_price: num(li.unit_price), amount: num(li.amount) }));\n  const tax = (raw.tax_lines || []).map((t) => ({ label: String(t.label || 'Tax'), rate: num(t.rate), amount: num(t.amount) })).filter((t) => t.amount !== null);\n  const inv = {\n    vendor: raw.vendor || null, vendor_tax_id: raw.vendor_tax_id || null, bill_to: raw.bill_to || null,\n    invoice_number: raw.invoice_number ? String(raw.invoice_number) : null,\n    issue_date: iso(raw.issue_date), due_date: iso(raw.due_date),\n    currency: raw.currency ? String(raw.currency).toUpperCase().slice(0, 3) : null,\n    line_items: items, subtotal: num(raw.subtotal), tax_lines: tax,\n    tax_total: num(raw.tax_total) ?? (tax.length ? tax.reduce((s, t) => s + t.amount, 0) : null),\n    total: num(raw.total), payment_terms: raw.payment_terms || null,\n  };\n  const checks = [];\n  const add = (id, ok, detail) => checks.push({ id, status: ok === null ? 'skip' : ok ? 'pass' : 'fail', detail });\n  const missing = ['vendor', 'invoice_number', 'issue_date', 'currency', 'subtotal', 'total'].filter((k) => inv[k] === null || inv[k] === undefined);\n  add('required', !missing.length, missing.length ? 'Missing: ' + missing.join(', ') : 'ok');\n  const priced = items.filter((li) => li.quantity !== null && li.unit_price !== null && li.amount !== null);\n  add('line_math', priced.length ? priced.every((li) => near(li.quantity * li.unit_price, li.amount)) : null, priced.length + ' lines');\n  const amounts = items.filter((li) => li.amount !== null);\n  const sum = amounts.reduce((s, li) => s + c(li.amount), 0) / 100;\n  add('items_sum', amounts.length && inv.subtotal !== null ? near(sum, inv.subtotal) : null, 'lines ' + sum + ' vs subtotal ' + inv.subtotal);\n  const find = (k) => tax.find((t) => new RegExp('^' + k + '\\\\b', 'i').test(t.label));\n  const cg = find('CGST'), sg = find('SGST') || find('UTGST'), ig = find('IGST');\n  const taxOk = (inv.tax_total === null || near(tax.reduce((s, t) => s + c(t.amount), 0) / 100, inv.tax_total))\n    && !(cg && sg && !near(cg.amount, sg.amount)) && !((cg || sg) && !(cg && sg)) && !(ig && (cg || sg))\n    && tax.every((t) => !(inv.subtotal && t.rate) || near(inv.subtotal * t.rate / 100, t.amount, Math.max(1, items.length)));\n  add('tax_breakdown', tax.length ? taxOk : null, tax.map((t) => t.label + ' ' + t.amount).join(', '));\n  add('totals', inv.subtotal !== null && inv.total !== null ? near(inv.subtotal + (inv.tax_total || 0), inv.total) : null, inv.subtotal + ' + ' + (inv.tax_total || 0) + ' vs ' + inv.total);\n  add('dates', !inv.issue_date ? false : !inv.due_date ? null : inv.due_date >= inv.issue_date, (inv.issue_date || '?') + ' -> ' + (inv.due_date || 'none'));\n  const key = dupKey(inv);\n  add('duplicate', key ? !seen.keys.includes(key) : null, key || 'no key');\n\n  const conf = raw.confidence || {};\n  const present = (k) => { const v = inv[k === 'tax_lines' ? 'tax_lines' : k]; return v !== null && v !== undefined && !(Array.isArray(v) && !v.length); };\n  const fields = ['vendor', 'vendor_tax_id', 'bill_to', 'invoice_number', 'issue_date', 'due_date', 'currency', 'line_items', 'subtotal', 'tax_lines', 'tax_total', 'total', 'payment_terms'].filter(present);\n  const scores = fields.map((k) => ({ k, v: Math.max(0, Math.min(1, Number(conf[k] ?? 0.5))) }));\n  const min = scores.length ? scores.reduce((a, b) => (b.v < a.v ? b : a)) : { k: null, v: 0 };\n  const failed = checks.filter((x) => x.status === 'fail').map((x) => x.id);\n  const auto = !failed.length && min.v >= FLOOR;\n  if (key && !seen.keys.includes(key)) { seen.keys.push(key); seen.keys = seen.keys.slice(-5000); }\n\n  const t = (id) => tax.find((x) => new RegExp('^' + id + '\\\\b', 'i').test(x.label))?.amount ?? '';\n  return { json: {\n    auto_approve: auto,\n    decision: auto ? 'auto_approve' : 'review',\n    failed_checks: failed,\n    low_confidence: scores.filter((s) => s.v < FLOOR).map((s) => s.k),\n    min_confidence: Math.round(min.v * 100) / 100,\n    flags: Array.isArray(raw.flags) ? raw.flags.slice(0, 6) : [],\n    checks, invoice: inv, dup_key: key,\n    row: {\n      received_at: new Date().toISOString(), from: prep.from, file: prep.file_name,\n      vendor: inv.vendor, vendor_tax_id: inv.vendor_tax_id, invoice_number: inv.invoice_number,\n      issue_date: inv.issue_date, due_date: inv.due_date, currency: inv.currency,\n      subtotal: inv.subtotal, cgst: t('CGST'), sgst: t('SGST'), igst: t('IGST'), tax_total: inv.tax_total,\n      total: inv.total, payment_terms: inv.payment_terms, min_confidence: Math.round(min.v * 100) / 100,\n    },\n    message_id: prep.message_id, subject: prep.subject,\n  } };\n});\n"
+      },
+      "id": "e22c808c-43e7-4c72-9963-4028e47dadaa",
+      "name": "Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        660,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "c9484c13-ba43-4bd5-9517-3b71587a0e30",
+              "leftValue": "={{ $json.auto_approve }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "73498a07-4b0b-48a8-a443-523ed4c9f31c",
+      "name": "Auto-approve?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "={{ $env.INVOICE_SHEET_ID }}",
+          "mode": "id"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "={{ $env.INVOICE_SHEET_TAB || 'Invoices' }}",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "received_at": "={{ $json.row.received_at }}",
+            "from": "={{ $json.row.from }}",
+            "file": "={{ $json.row.file }}",
+            "vendor": "={{ $json.row.vendor }}",
+            "vendor_tax_id": "={{ $json.row.vendor_tax_id }}",
+            "invoice_number": "={{ $json.row.invoice_number }}",
+            "issue_date": "={{ $json.row.issue_date }}",
+            "due_date": "={{ $json.row.due_date }}",
+            "currency": "={{ $json.row.currency }}",
+            "subtotal": "={{ $json.row.subtotal }}",
+            "cgst": "={{ $json.row.cgst }}",
+            "sgst": "={{ $json.row.sgst }}",
+            "igst": "={{ $json.row.igst }}",
+            "tax_total": "={{ $json.row.tax_total }}",
+            "total": "={{ $json.row.total }}",
+            "payment_terms": "={{ $json.row.payment_terms }}",
+            "min_confidence": "={{ $json.row.min_confidence }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "received_at",
+              "displayName": "received_at",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "from",
+              "displayName": "from",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "file",
+              "displayName": "file",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vendor",
+              "displayName": "vendor",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "vendor_tax_id",
+              "displayName": "vendor_tax_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "invoice_number",
+              "displayName": "invoice_number",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "issue_date",
+              "displayName": "issue_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "due_date",
+              "displayName": "due_date",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "currency",
+              "displayName": "currency",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "subtotal",
+              "displayName": "subtotal",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "cgst",
+              "displayName": "cgst",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sgst",
+              "displayName": "sgst",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "igst",
+              "displayName": "igst",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tax_total",
+              "displayName": "tax_total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "total",
+              "displayName": "total",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "payment_terms",
+              "displayName": "payment_terms",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "min_confidence",
+              "displayName": "min_confidence",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "263e26c3-f5c9-4a23-8cb8-414557b5ca7d",
+      "name": "Append to Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        1120,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "={{ $env.SLACK_REVIEW_CHANNEL }}",
+          "mode": "name"
+        },
+        "text": "={{ '*Invoice needs review*\\n' +\n  '*' + ($json.invoice.vendor || 'Unknown vendor') + '* · ' + ($json.invoice.invoice_number || 'no number') + ' · ' + ($json.invoice.currency || '') + ' ' + ($json.invoice.total ?? '?') + '\\n' +\n  'Failed checks: ' + ($json.failed_checks.length ? $json.failed_checks.join(', ') : 'none') + '\\n' +\n  'Low confidence: ' + ($json.low_confidence.length ? $json.low_confidence.join(', ') : 'none') + ' (min ' + $json.min_confidence + ')\\n' +\n  ($json.flags.length ? 'Notes: ' + $json.flags.join(' | ') + '\\n' : '') +\n  'From: ' + ($json.row.from || '?') + ' · File: ' + ($json.row.file || '?') }}",
+        "otherOptions": {}
+      },
+      "id": "f1d62a95-7c10-4306-ae15-24c073149121",
+      "name": "Slack review",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.2,
+      "position": [
+        1120,
+        400
+      ],
+      "webhookId": "690a76fa-58c5-4c8a-ab12-4ecd5a8e7bd0"
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare attachment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare attachment": {
+      "main": [
+        [
+          {
+            "node": "Extract (Gemini)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract (Gemini)": {
+      "main": [
+        [
+          {
+            "node": "Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate": {
+      "main": [
+        [
+          {
+            "node": "Auto-approve?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto-approve?": {
+      "main": [
+        [
+          {
+            "node": "Append to Sheets",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": []
+}

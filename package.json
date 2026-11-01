@@ -1,0 +1,14 @@
+{
+  "name": "invoice-extractor",
+  "version": "0.1.0",
+  "description": "Invoice and Document Extractor: paste text or upload a PDF or image, get validated JSON with per-field confidence, auto-approve or human review routing, and CSV export.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev": "node scripts/dev-server.mjs",
+    "start": "node scripts/dev-server.mjs",
+    "test": "node --test"
+  }
+}

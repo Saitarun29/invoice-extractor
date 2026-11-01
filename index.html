@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Invoice and Document Extractor · structured JSON, validation checks, review queue</title>
+  <meta name="description" content="Paste invoice text or upload a PDF or image. Get clean JSON with per-field confidence, arithmetic and date checks, duplicate detection, and auto-approve or human review routing. Export approved rows as CSV." />
+  <meta property="og:title" content="Invoice and Document Extractor" />
+  <meta property="og:description" content="Invoice to validated JSON: per-field confidence, seven checks, auto-approve or review queue, CSV export." />
+  <meta property="og:type" content="website" />
+  <meta property="og:url" content="https://invoice-extractor.vercel.app" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="theme-color" content="#F7F7F5" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23111111'/%3E%3Cpath d='M10 8h9l4 4v12H10z' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3Cpath d='M13 16h7M13 20h5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/style.css" />
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="nav">
+    <div class="wrap nav-in">
+      <a class="brand" href="./" aria-label="Invoice Extractor home">
+        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="currentColor"/><path d="M10 8h9l4 4v12H10z" fill="none" stroke="#fff" stroke-width="2" stroke-linejoin="round"/><path d="M13 16h7M13 20h5" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>
+        <span>Invoice Extractor</span>
+      </a>
+      <span class="crumb" aria-hidden="true">/</span>
+      <span class="crumb-cur">Playground</span>
+      <div class="nav-right">
+        <span id="modeBadge" class="badge" role="status" title="Checking server mode">Checking…</span>
+        <a class="nav-link" href="https://github.com/Saitarun29/invoice-extractor/blob/main/n8n/invoice-extractor.n8n.json" target="_blank" rel="noopener">n8n workflow</a>
+        <a class="nav-link" href="https://github.com/Saitarun29/invoice-extractor" target="_blank" rel="noopener">GitHub</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main" class="wrap">
+    <div class="page-head">
+      <div>
+        <h1>Invoice and document extractor</h1>
+        <p class="lede">Paste an invoice or upload a PDF. Get clean JSON with a confidence score per field, seven validation checks, and a routing decision: auto-approve, or a person reviews it.</p>
+      </div>
+      <dl class="facts" aria-label="Routing thresholds">
+        <div><dt>Auto-approve floor</dt><dd class="num">0.85</dd></div>
+        <div><dt>Checks</dt><dd class="num">7</dd></div>
+        <div><dt>Max upload</dt><dd class="num">3 MB</dd></div>
+      </dl>
+    </div>
+
+    <div class="layout">
+      <!-- Input -->
+      <section class="panel" aria-labelledby="inTitle">
+        <div class="panel-head">
+          <h2 id="inTitle">Document</h2>
+          <code class="endpoint">POST /api/extract</code>
+        </div>
+        <div class="panel-body">
+          <p class="label" id="presetLabel">Sample</p>
+          <div id="presets" class="presets" role="radiogroup" aria-labelledby="presetLabel"></div>
+
+          <div class="seg" role="tablist" aria-label="Input type">
+            <button type="button" role="tab" id="tabText" aria-controls="paneText" aria-selected="true" tabindex="0">Paste text</button>
+            <button type="button" role="tab" id="tabFile" aria-controls="paneFile" aria-selected="false" tabindex="-1">Upload file</button>
+          </div>
+
+          <div id="paneText" role="tabpanel" aria-labelledby="tabText">
+            <div class="editor-head">
+              <label class="label" for="editor">Invoice text</label>
+              <span id="charCount" class="json-state ok" aria-live="polite">0 / 20,000</span>
+            </div>
+            <textarea id="editor" spellcheck="false" maxlength="20000" aria-describedby="editorHelp" placeholder="Paste the text of an invoice, bill or receipt…"></textarea>
+            <p id="editorHelp" class="help">Any layout. Indian dates are read day-first. Text never leaves the extraction call.</p>
+          </div>
+
+          <div id="paneFile" role="tabpanel" aria-labelledby="tabFile" hidden>
+            <label class="drop" id="drop" for="fileInput">
+              <svg class="drop-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V4m0 0L8 8m4-4l4 4M5 15v3a2 2 0 002 2h10a2 2 0 002-2v-3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              <span id="dropText"><b>Choose a file</b> or drop it here</span>
+              <small>PDF, PNG, JPEG or WebP · up to 3 MB</small>
+            </label>
+            <input id="fileInput" class="sr-only" type="file" tabindex="-1" aria-label="Invoice file" accept="application/pdf,image/png,image/jpeg,image/webp" />
+            <p id="fileHelp" class="help">Files go to Gemini as inline data in live mode.</p>
+          </div>
+
+          <p id="presetNote" class="note" hidden></p>
+
+          <div class="actions">
+            <button id="runBtn" class="btn btn-primary" type="button"><span class="btn-label">Extract</span><kbd>Ctrl ↵</kbd></button>
+            <button id="clearBtn" class="btn" type="button">Clear</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Result -->
+      <section class="panel" aria-labelledby="resTitle">
+        <div class="panel-head">
+          <h2 id="resTitle">Extraction</h2>
+          <span id="resMeta" class="meta">Idle</span>
+        </div>
+        <div id="resultEmpty" class="empty tall">
+          <p><b>No document yet.</b></p>
+          <p>Pick a sample and press Extract. The result appears here as fields, checks and JSON.</p>
+        </div>
+        <div id="resultLoading" class="loading" hidden aria-live="polite">
+          <span class="sr-only">Extracting…</span>
+          <div class="sk w40"></div><div class="sk w70"></div><div class="sk w55"></div><div class="sk w80"></div><div class="sk w35"></div>
+        </div>
+        <div id="errorBox" class="alert inset" role="alert" hidden></div>
+        <div id="result" hidden aria-live="polite">
+          <div id="stats" class="stats"></div>
+          <div id="routeBox"></div>
+          <div class="tabs" role="tablist" aria-label="Result view">
+            <button type="button" role="tab" id="vtFields" aria-controls="vFields" aria-selected="true" tabindex="0">Fields</button>
+            <button type="button" role="tab" id="vtChecks" aria-controls="vChecks" aria-selected="false" tabindex="-1">Checks</button>
+            <button type="button" role="tab" id="vtJson" aria-controls="vJson" aria-selected="false" tabindex="-1">JSON</button>
+          </div>
+          <div id="vFields" role="tabpanel" aria-labelledby="vtFields" class="view"></div>
+          <div id="vChecks" role="tabpanel" aria-labelledby="vtChecks" class="view" hidden></div>
+          <div id="vJson" role="tabpanel" aria-labelledby="vtJson" class="view" hidden>
+            <div class="json-bar"><span class="meta">Same contract in demo and live mode</span><button id="copyBtn" class="btn btn-sm" type="button">Copy JSON</button></div>
+            <pre id="jsonOut" class="code" tabindex="0" aria-label="Extracted JSON"></pre>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- Review queue -->
+    <section class="panel" aria-labelledby="qTitle">
+      <div class="panel-head">
+        <h2 id="qTitle">Review queue <span id="qCount" class="count">0</span></h2>
+        <span class="meta">Edit fields, checks re-run as you type</span>
+      </div>
+      <ul id="queue" class="queue"></ul>
+      <p id="queueEmpty" class="empty">Nothing waiting. Invoices that fail a check or fall below 0.85 confidence land here.</p>
+    </section>
+
+    <!-- Approved -->
+    <section class="panel" aria-labelledby="aTitle">
+      <div class="panel-head">
+        <h2 id="aTitle">Approved <span id="aCount" class="count">0</span></h2>
+        <div class="head-actions">
+          <span class="meta hide-sm">Stored in this browser</span>
+          <button id="exportBtn" class="btn btn-sm" type="button">Export CSV</button>
+          <button id="resetBtn" class="btn btn-sm" type="button" title="Clear approved rows, the review queue and duplicate history">Reset session</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th scope="col">Approved</th><th scope="col">Route</th><th scope="col">Vendor</th><th scope="col">Invoice</th><th scope="col">Issued</th><th scope="col" class="r">Tax</th><th scope="col" class="r">Total</th><th scope="col" class="r">Min conf.</th></tr></thead>
+          <tbody id="approvedBody"></tbody>
+        </table>
+        <p id="approvedEmpty" class="empty">No approved invoices yet. Auto-approved and human-approved rows collect here for CSV export.</p>
+      </div>
+    </section>
+
+    <section class="principles" aria-label="Design principles">
+      <div><h3>Copy, never correct</h3><p>The model transcribes numbers as printed. Code does the arithmetic, so a wrong total is caught instead of silently fixed.</p></div>
+      <div><h3>Confidence is per field</h3><p>One blurry date sends an invoice to review. The reviewer sees which fields to check, not a single opaque score.</p></div>
+      <div><h3>Same logic as the n8n import</h3><p>Checks, the 0.85 floor and the duplicate key mirror the workflow's validate node.</p></div>
+    </section>
+
+    <section class="impact" aria-labelledby="impTitle">
+      <div class="impact-head">
+        <h2 id="impTitle">Business impact</h2>
+        <span class="badge plain">Estimated</span>
+      </div>
+      <p class="small">Illustrative assumptions for a team processing 500 invoices a month, not measured results. Swap in your own numbers.</p>
+      <dl class="impact-grid">
+        <div><dt>Manual entry today</dt><dd>~5 min per invoice</dd><span>≈ 42 hours a month</span></div>
+        <div><dt>If 70% auto-approve</dt><dd>~1 min review for the rest</dd><span>≈ 2.5 hours a month</span></div>
+        <div><dt>Errors caught before payment</dt><dd>Maths, dates, duplicates</dd><span>Checked on every invoice</span></div>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <div class="wrap foot-in">
+      <p>Built by Sai Tarun Ronanki · <a href="https://github.com/Saitarun29/invoice-extractor" target="_blank" rel="noopener">GitHub</a></p>
+      <nav class="foot-links" aria-label="Author links">
+        <a class="btn btn-primary btn-sm" href="https://wa.me/918008941430?text=Hello%20Sai%20Tarun%20Ronanki,%20I%20want%20to%20discuss%20about%20my%20workflow" target="_blank" rel="noopener">Discuss your workflow</a>
+      </nav>
+    </div>
+  </footer>
+
+  <script type="module" src="assets/app.js"></script>
+</body>
+</html>
