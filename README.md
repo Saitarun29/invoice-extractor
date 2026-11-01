@@ -5,7 +5,7 @@
 <p>Turn an invoice, bill or receipt into validated JSON, then auto-approve it or send it to a person, with the reason attached.</p>
 
 <p>
-  <a href="https://invoice-extractor.vercel.app"><img alt="Live demo" src="https://img.shields.io/badge/live%20demo-online-27272a?style=flat&labelColor=18181b"></a>
+  <a href="https://invoice-extractor-lemon-tau.vercel.app"><img alt="Live demo" src="https://img.shields.io/badge/live%20demo-online-27272a?style=flat&labelColor=18181b"></a>
   <a href="n8n/invoice-extractor.n8n.json"><img alt="n8n workflow included" src="https://img.shields.io/badge/n8n%20workflow-included-52525b?style=flat&labelColor=18181b"></a>
   <a href="LICENSE"><img alt="License MIT" src="https://img.shields.io/badge/license-MIT-27272a?style=flat&labelColor=18181b"></a>
   <img alt="Vercel" src="https://img.shields.io/badge/deploy-Vercel-52525b?style=flat&labelColor=18181b">
@@ -13,7 +13,7 @@
 </p>
 
 <p>
-  <a href="https://invoice-extractor.vercel.app"><b>Live demo</b></a> ·
+  <a href="https://invoice-extractor-lemon-tau.vercel.app"><b>Live demo</b></a> ·
   <a href="#n8n-workflow"><b>n8n workflow</b></a> ·
   <a href="#how-it-works"><b>Architecture</b></a> ·
   <a href="#run-locally"><b>Run locally</b></a>
